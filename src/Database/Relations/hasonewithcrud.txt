@@ -1,0 +1,182 @@
+<?php
+
+namespace Axcel\Database\Relations;
+
+use Axcel\Database\Model;
+use Axcel\Database\Builder;
+
+class HasOne
+{
+    protected Model $parent;
+    protected Model $related;
+    protected string $foreignKey;
+    protected string $localKey;
+    protected ?Builder $query = null;
+
+    public function __construct(Model $related, Model $parent, string $foreignKey, string $localKey)
+    {
+        $this->related = $related;
+        $this->parent = $parent;
+        $this->foreignKey = $foreignKey;
+        $this->localKey = $localKey;
+
+        $this->query = $this->related->query()
+            ->where($this->foreignKey, '=', $this->parent->getAttribute($this->localKey));
+    }
+
+    public function getQuery(): Builder
+    {
+        return $this->query;
+    }
+
+    public function getResults()
+    {
+        return $this->query->first();
+    }
+
+    /**
+     * Create a new related model instance
+     */
+    public function create(array $attributes = []): Model
+    {
+        // Add the foreign key value to the attributes
+        $attributes[$this->foreignKey] = $this->getParentKey();
+
+        // Create a new instance of the related model
+        $instance = new ($this->related::class);
+        $instance->fill($attributes);
+        $instance->save();
+
+        return $instance;
+    }
+
+    /**
+     * Get the first related model or create a new one
+     */
+    public function firstOrCreate(array $attributes = [], array $values = []): Model
+    {
+        // Try to find existing record
+        $instance = $this->getResults();
+
+        if ($instance) {
+            return $instance;
+        }
+
+        // Create new record if not found
+        return $this->create(array_merge($attributes, $values));
+    }
+
+    /**
+     * Update the related model or create it if it doesn't exist
+     */
+    public function updateOrCreate(array $attributes, array $values = []): Model
+    {
+        // Try to find existing record
+        $instance = $this->getResults();
+
+        if ($instance) {
+            // Update existing record
+            $instance->fill($values);
+            $instance->save();
+            return $instance;
+        }
+
+        // Create new record if not found
+        return $this->create(array_merge($attributes, $values));
+    }
+
+    /**
+     * Update the related model
+     */
+    public function update(array $attributes): bool
+    {
+        $instance = $this->getResults();
+
+        if (!$instance) {
+            return false;
+        }
+
+        $instance->fill($attributes);
+        return $instance->save();
+    }
+
+    /**
+     * Delete the related model
+     */
+    public function delete(): bool
+    {
+        $instance = $this->getResults();
+
+        if (!$instance) {
+            return false;
+        }
+
+        return $instance->delete();
+    }
+
+    /**
+     * Get the parent key value
+     */
+    protected function getParentKey()
+    {
+        return $this->parent->getAttribute($this->localKey);
+    }
+
+    /**
+     * Get the foreign key name
+     */
+    public function getForeignKeyName(): string
+    {
+        return $this->foreignKey;
+    }
+
+    /**
+     * Get the local key name
+     */
+    public function getLocalKeyName(): string
+    {
+        return $this->localKey;
+    }
+
+    /**
+     * Get the related model instance
+     */
+    public function getRelated(): Model
+    {
+        return $this->related;
+    }
+
+    /**
+     * Get the parent model instance
+     */
+    public function getParent(): Model
+    {
+        return $this->parent;
+    }
+
+    /**
+     * Associate a model with the parent
+     */
+    public function associate(Model $model): Model
+    {
+        $model->setAttribute($this->foreignKey, $this->getParentKey());
+        $model->save();
+
+        return $model;
+    }
+
+    /**
+     * Dissociate the related model from the parent
+     */
+    public function dissociate(): bool
+    {
+        $instance = $this->getResults();
+
+        if (!$instance) {
+            return false;
+        }
+
+        $instance->setAttribute($this->foreignKey, null);
+        return $instance->save();
+    }
+}

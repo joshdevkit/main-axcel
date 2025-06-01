@@ -1,0 +1,285 @@
+<?php
+
+namespace Axcel\Container;
+
+use Psr\Container\ContainerInterface;
+use Psr\Container\ContainerExceptionInterface;
+use Psr\Container\NotFoundExceptionInterface;
+use Exception;
+use ReflectionClass;
+use ReflectionParameter;
+use Closure;
+
+class ContainerException extends Exception implements ContainerExceptionInterface {}
+class NotFoundException extends Exception implements NotFoundExceptionInterface {}
+
+class Containerasdasdasd implements ContainerInterface
+{
+    private static ?Container $instance = null;
+    private array $bindings = [];
+    private array $instances = [];
+    private array $aliases = [];
+
+    private function __construct() {}
+
+    public static function getInstance(): Container
+    {
+        if (self::$instance === null) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    public function bind(string $abstract, $concrete = null, bool $shared = false): void
+    {
+        if ($concrete === null) {
+            $concrete = $abstract;
+        }
+
+        $this->bindings[$abstract] = [
+            'concrete' => $concrete,
+            'shared' => $shared
+        ];
+    }
+
+    public function singleton(string $abstract, $concrete = null): void
+    {
+        $this->bind($abstract, $concrete, true);
+    }
+
+    public function instance(string $abstract, $instance): void
+    {
+        $this->instances[$abstract] = $instance;
+    }
+
+    public function alias(string $abstract, string $alias): void
+    {
+        $this->aliases[$alias] = $abstract;
+    }
+
+    public function get(string $id)
+    {
+        // Resolve alias
+        if (isset($this->aliases[$id])) {
+            $id = $this->aliases[$id];
+        }
+
+        // Return already instantiated instance
+        if (isset($this->instances[$id])) {
+            return $this->instances[$id];
+        }
+
+        // If no binding and class exists, set default binding
+        if (!isset($this->bindings[$id]) && class_exists($id)) {
+            $this->bind($id);
+        }
+
+        if (!$this->has($id)) {
+            throw new NotFoundException("Service '$id' not found in container");
+        }
+
+        $binding = $this->bindings[$id];
+        $concrete = $binding['concrete'];
+        $shared = $binding['shared'];
+
+        $instance = $this->resolve($concrete);
+
+        if ($shared) {
+            $this->instances[$id] = $instance;
+        }
+
+        return $instance;
+    }
+
+
+    public function has(string $id): bool
+    {
+        // Resolve alias if exists
+        if (isset($this->aliases[$id])) {
+            $id = $this->aliases[$id];
+        }
+
+        // Bound or instantiated services
+        if (isset($this->bindings[$id]) || isset($this->instances[$id])) {
+            return true;
+        }
+
+        // Auto-resolve any existing class
+        if (class_exists($id)) {
+            return true;
+        }
+
+        return false;
+    }
+
+
+    private function resolve($concrete)
+    {
+        // If it's a closure, call it
+        if ($concrete instanceof Closure) {
+            return $concrete($this);
+        }
+
+        // If it's not a string, return as is
+        if (!is_string($concrete)) {
+            return $concrete;
+        }
+
+        // If it's a class, resolve dependencies
+        if (class_exists($concrete)) {
+            return $this->resolveClass($concrete);
+        }
+
+        throw new ContainerException("Cannot resolve '$concrete'");
+    }
+
+    private function resolveClass(string $className)
+    {
+        $reflection = new ReflectionClass($className);
+
+        if (!$reflection->isInstantiable()) {
+            throw new ContainerException("Class '$className' is not instantiable");
+        }
+
+        $constructor = $reflection->getConstructor();
+
+        if ($constructor === null) {
+            return new $className();
+        }
+
+        $dependencies = $this->resolveDependencies($constructor->getParameters());
+
+        return $reflection->newInstanceArgs($dependencies);
+    }
+
+    private function resolveDependencies(array $parameters): array
+    {
+        $dependencies = [];
+
+        foreach ($parameters as $parameter) {
+            $dependency = $this->resolveDependency($parameter);
+            $dependencies[] = $dependency;
+        }
+
+        return $dependencies;
+    }
+
+    private function resolveDependency(ReflectionParameter $parameter)
+    {
+        $type = $parameter->getType();
+
+        if ($type === null) {
+            if ($parameter->isDefaultValueAvailable()) {
+                return $parameter->getDefaultValue();
+            }
+            throw new ContainerException("Cannot resolve parameter '{$parameter->getName()}'");
+        }
+
+        $typeName = $type->getName();
+
+        // If it's a built-in type, check for default value
+        if ($type->isBuiltin()) {
+            if ($parameter->isDefaultValueAvailable()) {
+                return $parameter->getDefaultValue();
+            }
+            throw new ContainerException("Cannot resolve built-in type '$typeName' for parameter '{$parameter->getName()}'");
+        }
+
+        // Try to resolve from container
+        if ($this->has($typeName)) {
+            return $this->get($typeName);
+        }
+
+        // Try to auto-resolve the class
+        if (class_exists($typeName)) {
+            return $this->resolveClass($typeName);
+        }
+
+        if ($parameter->isDefaultValueAvailable()) {
+            return $parameter->getDefaultValue();
+        }
+
+        throw new ContainerException("Cannot resolve dependency '$typeName' for parameter '{$parameter->getName()}'");
+    }
+
+    public function call($callback, array $parameters = [])
+    {
+        if (is_string($callback) && strpos($callback, '@') !== false) {
+            $callback = $this->parseCallback($callback);
+        }
+
+        if (is_array($callback)) {
+            [$class, $method] = $callback;
+
+            if (is_string($class)) {
+                $class = $this->get($class);
+            }
+
+            $reflection = new \ReflectionMethod($class, $method);
+            $dependencies = $this->resolveMethodDependencies($reflection, $parameters);
+
+            return $reflection->invokeArgs($class, $dependencies);
+        }
+
+        if ($callback instanceof Closure) {
+            $reflection = new \ReflectionFunction($callback);
+            $dependencies = $this->resolveMethodDependencies($reflection, $parameters);
+
+            return $reflection->invokeArgs($dependencies);
+        }
+
+        throw new ContainerException("Invalid callback provided");
+    }
+
+    private function parseCallback(string $callback): array
+    {
+        [$class, $method] = explode('@', $callback, 2);
+        return [$class, $method];
+    }
+
+    private function resolveMethodDependencies($reflection, array $parameters = []): array
+    {
+        $dependencies = [];
+
+        foreach ($reflection->getParameters() as $parameter) {
+            $name = $parameter->getName();
+
+            // Check if parameter was provided
+            if (array_key_exists($name, $parameters)) {
+                $dependencies[] = $parameters[$name];
+                continue;
+            }
+
+            // Try to resolve dependency
+            $type = $parameter->getType();
+
+            if ($type && !$type->isBuiltin()) {
+                $typeName = $type->getName();
+
+                if ($this->has($typeName)) {
+                    $dependencies[] = $this->get($typeName);
+                    continue;
+                }
+
+                if (class_exists($typeName)) {
+                    $dependencies[] = $this->resolveClass($typeName);
+                    continue;
+                }
+            }
+
+            // Use default value if available
+            if ($parameter->isDefaultValueAvailable()) {
+                $dependencies[] = $parameter->getDefaultValue();
+                continue;
+            }
+
+            throw new ContainerException("Cannot resolve parameter '$name' for method");
+        }
+
+        return $dependencies;
+    }
+
+    // Prevent cloning and unserialization
+    private function __clone() {}
+    public function __wakeup() {}
+}
